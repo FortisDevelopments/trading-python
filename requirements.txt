@@ -1,0 +1,7 @@
+pandas>=2.3.3
+numpy>=2.2.6
+joblib>=1.5.2
+python-dotenv>=1.2.1
+python-binance>=1.0.34
+xgboost>=1.7.6
+scikit-learn>=1.7.2
