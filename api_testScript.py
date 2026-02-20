@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
 """
-Converted from api_testScript.ipynb
+api_testScript.py (cron-ready)
 
-Runs one cycle:
-- Load env (.env) for Binance testnet keys
-- Healthcheck testnet
+One cycle:
+- Load env (.env)
+- Healthcheck Binance testnet
 - Load trained classifier
 - Fetch latest MAINNET 4h klines (for feature history)
 - Build features
 - Compute live buy probability + signal
-- If signal==1 and under MAX_OPEN_TRADES, place MARKET BUY on TESTNET and attach OCO TP/SL (best-effort)
-- Log signal/trade/spread/open orders to CSV
+- If signal==1 and under MAX_OPEN_TRADES:
+    - Place MARKET BUY on TESTNET
+    - Attach OCO TP/SL best-effort (non-fatal if unsupported)
+- Log run + optional order to your Node/Express API (MySQL)
+- (Optional) Also append a local CSV log for backup
 
 Notes:
 - Candles are fetched from mainnet (public) for sufficient history, while orders are placed on testnet.
-- OCO may be unsupported/limited on some testnet environments. If OCO fails, the script will raise.
+- OCO may be unsupported/limited on some testnet environments. If OCO fails, the script will continue.
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -33,10 +36,34 @@ from dotenv import load_dotenv
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
 
+
+# Ensure imports from the same folder work under cron (logger_api.py)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+
+# Load .env early so module-level config picks it up
+load_dotenv()
+
+# Try to import API logger helpers (optional)
+try:
+    from logger_api import log_run_and_optional_order
+except Exception:
+    log_run_and_optional_order = None  # type: ignore
+
+
 # ==========================
-# CONFIG (edit as needed)
+# CONFIG (edit via .env)
 # ==========================
+BOT_ID = os.getenv("BOT_ID", "btc_4h_testnet3")
+
+# If 1, send logs to backend via logger_api; if logger_api missing, it will be skipped.
+ENABLE_API_LOGGING = os.getenv("ENABLE_API_LOGGING", "1") == "1"
+
+# Local CSV backup logging (optional)
+ENABLE_CSV_LOGGING = os.getenv("ENABLE_CSV_LOGGING", "1") == "1"
 LOG_PATH = os.getenv("TRADE_LOG_PATH", "trade_log.csv")
+
 MODEL_PATH = os.getenv("MODEL_PATH", "btc_4h_xgb_classifier.joblib")
 
 SYMBOL = os.getenv("SYMBOL", "BTCUSDT")
@@ -59,19 +86,46 @@ FEATURE_COLS = [
     "MACD", "MACD_signal",
     "PROC_HORIZON",
     "hour",
-    "ADX_14"
+    "ADX_14",
 ]
 
 
 # ==========================
-# Logging helpers
+# Local CSV logging helpers
 # ==========================
 def append_log(rows: List[dict]) -> None:
-    if not rows:
+    """Append rows to local CSV log (best-effort)."""
+    if not ENABLE_CSV_LOGGING or not rows:
         return
-    df = pd.DataFrame(rows)
-    header = not os.path.exists(LOG_PATH)
-    df.to_csv(LOG_PATH, mode="a", header=header, index=False)
+    try:
+        df = pd.DataFrame(rows)
+        header = not os.path.exists(LOG_PATH)
+        df.to_csv(LOG_PATH, mode="a", header=header, index=False)
+    except Exception:
+        # Never crash trading because logging failed
+        pass
+
+
+# ==========================
+# API logging helpers
+# ==========================
+def log_run_and_order_to_api(run_payload: Dict[str, Any], order_payload: Optional[Dict[str, Any]] = None) -> Optional[int]:
+    """
+    Best-effort DB logging via your Node/Express API.
+    Returns run_id if logged successfully, else None.
+    """
+    if not ENABLE_API_LOGGING or log_run_and_optional_order is None:
+        return None
+    try:
+        resp = log_run_and_optional_order(run_payload, order_payload)
+        return resp.get("run_id")
+    except Exception as e:
+        append_log([{
+            "event": "api_log_error",
+            "ts": pd.Timestamp.utcnow().isoformat(),
+            "message": str(e),
+        }])
+        return None
 
 
 # ==========================
@@ -143,7 +197,7 @@ def fetch_4h_klines_mainnet(client_market: Client, symbol: str, limit: int = 150
     cols = [
         "open_time", "Open", "High", "Low", "Close", "Volume",
         "close_time", "quote_asset_volume", "number_of_trades",
-        "taker_buy_base", "taker_buy_quote", "ignore"
+        "taker_buy_base", "taker_buy_quote", "ignore",
     ]
     df = pd.DataFrame(klines, columns=cols)
 
@@ -216,7 +270,6 @@ def build_features(df_ohlcv: pd.DataFrame, horizon_steps: int) -> pd.DataFrame:
 
     df = df.dropna()
 
-    # Sanity: ensure needed columns exist
     missing = [c for c in FEATURE_COLS if c not in df.columns]
     if missing:
         raise RuntimeError(f"Missing feature columns after build: {missing}")
@@ -295,6 +348,11 @@ def place_oco_tp_sl(
     stop_loss_pct: float,
     sl_limit_buffer_pct: float = 0.001,
 ) -> Dict[str, Any]:
+    """
+    Best-effort OCO placement.
+    Returns schema + raw response.
+    Raises BinanceAPIException / RuntimeError on failure.
+    """
     filters = get_symbol_filters(client_testnet, symbol)
 
     lot = filters["LOT_SIZE"]
@@ -340,7 +398,7 @@ def place_oco_tp_sl(
             stopLimitPrice=sl_limit_str,
             stopLimitTimeInForce="GTC",
         )
-        return {"schema": "old", "oco": oco}
+        return {"schema": "old", "oco": oco, "tp_price": float(tp_dec), "sl_stop": float(sl_stop_dec), "sl_limit": float(sl_limit_dec)}
     except BinanceAPIException:
         pass
 
@@ -359,10 +417,10 @@ def place_oco_tp_sl(
 
     if hasattr(client_testnet, "_post"):
         oco = safe_call(client_testnet, client_testnet._post, "orderList/oco", True, data=params)
-        return {"schema": "new(_post)", "oco": oco}
+        return {"schema": "new(_post)", "oco": oco, "tp_price": float(tp_dec), "sl_stop": float(sl_stop_dec), "sl_limit": float(sl_limit_dec)}
     if hasattr(client_testnet, "_request"):
         oco = safe_call(client_testnet, client_testnet._request, "post", "orderList/oco", True, data=params)
-        return {"schema": "new(_request)", "oco": oco}
+        return {"schema": "new(_request)", "oco": oco, "tp_price": float(tp_dec), "sl_stop": float(sl_stop_dec), "sl_limit": float(sl_limit_dec)}
 
     raise RuntimeError("Client cannot send new OCO schema; upgrade client or use official connector.")
 
@@ -373,7 +431,13 @@ def trade_once_if_signal(
     client_testnet: Client,
     symbol: str,
 ) -> Dict[str, Any]:
+    """
+    Runs one decision cycle and logs to API (best-effort).
+    Returns a response dict with 'action' and details.
+    """
     resync_time(client_testnet)
+
+    run_ts = datetime.now(timezone.utc)
 
     sig = get_live_signal(
         clf,
@@ -384,93 +448,136 @@ def trade_once_if_signal(
         debug=True,
     )
 
-    # log signal
-    append_log([{
-        "event": "signal",
-        "ts": pd.Timestamp.utcnow().isoformat(),
-        "candle_ts": str(sig["timestamp"]),
-        "close": sig["close"],
-        "p_buy": sig["p_buy"],
-        "signal": sig["signal"],
-    }])
+    candle_ts = sig["timestamp"].to_pydatetime() if hasattr(sig["timestamp"], "to_pydatetime") else sig["timestamp"]
+
+    # Always fetch balance for logging/decision
+    usdt_free, _ = get_free_balance(client_testnet, "USDT")
+
+    # Default run log
+    decision = "none"
+    message = None
+    order_payload = None
 
     if sig["signal"] != 1:
         print("No BUY signal. No action.")
-        return {"signal": sig, "action": "none"}
+        decision = "none"
 
-    open_trades = approx_open_trades(client_testnet, symbol)
-    print(f"Open trades (approx): {open_trades} / MAX_OPEN_TRADES: {MAX_OPEN_TRADES}")
-    if open_trades >= int(MAX_OPEN_TRADES):
-        print("Max open trades reached. No new trade.")
-        return {"signal": sig, "action": "skipped_max_open_trades"}
+    else:
+        open_trades = approx_open_trades(client_testnet, symbol)
+        print(f"Open trades (approx): {open_trades} / MAX_OPEN_TRADES: {MAX_OPEN_TRADES}")
 
-    usdt_free, _ = get_free_balance(client_testnet, "USDT")
-    usdt_amount = usdt_free * float(PCT_ACCOUNT_PER_TRADE)
-    if usdt_amount < 10:
-        print(f"USDT free={usdt_free:.2f}. Computed trade amount={usdt_amount:.2f} too small.")
-        return {"signal": sig, "action": "skipped_small_notional"}
+        if open_trades >= int(MAX_OPEN_TRADES):
+            print("Max open trades reached. No new trade.")
+            decision = "skipped_max_open_trades"
+        else:
+            usdt_amount = usdt_free * float(PCT_ACCOUNT_PER_TRADE)
+            if usdt_amount < 10:
+                print(f"USDT free={usdt_free:.2f}. Computed trade amount={usdt_amount:.2f} too small.")
+                decision = "skipped_small_notional"
+            else:
+                print(f"USDT free={usdt_free:.2f}. Using usdt_amount={usdt_amount:.2f} (pct={PCT_ACCOUNT_PER_TRADE})")
 
-    print(f"USDT free={usdt_free:.2f}. Using usdt_amount={usdt_amount:.2f} (pct={PCT_ACCOUNT_PER_TRADE})")
+                buy = market_buy_usdt(client_testnet, symbol=symbol, usdt_amount=usdt_amount)
+                qty = buy["executed_qty"]
+                entry = buy["avg_price"]
 
-    buy = market_buy_usdt(client_testnet, symbol=symbol, usdt_amount=usdt_amount)
-    qty = buy["executed_qty"]
-    entry = buy["avg_price"]
+                if entry is None or qty <= 0:
+                    raise RuntimeError("Buy did not execute properly; cannot place TP/SL.")
 
-    if entry is None or qty <= 0:
-        raise RuntimeError("Buy did not execute properly; cannot place OCO.")
+                print(f"Bought qty={qty:.8f} @ avg entry={entry:.2f}")
 
-    print(f"Bought qty={qty:.8f} @ avg entry={entry:.2f}")
+                # Try OCO (non-fatal if it fails)
+                oco = None
+                tp_price = entry * (1 + TAKE_PROFIT)
+                sl_stop = entry * (1 - STOP_LOSS)
+                sl_limit = sl_stop * (1 - 0.001)
 
-    oco = place_oco_tp_sl(
-        client_testnet,
-        symbol=symbol,
-        qty=qty,
-        entry_price=entry,
-        take_profit_pct=TAKE_PROFIT,
-        stop_loss_pct=STOP_LOSS,
-        sl_limit_buffer_pct=0.001,
-    )
+                try:
+                    oco = place_oco_tp_sl(
+                        client_testnet,
+                        symbol=symbol,
+                        qty=qty,
+                        entry_price=entry,
+                        take_profit_pct=TAKE_PROFIT,
+                        stop_loss_pct=STOP_LOSS,
+                        sl_limit_buffer_pct=0.001,
+                    )
+                    # Prefer quantized values from OCO function
+                    tp_price = oco.get("tp_price", tp_price)
+                    sl_stop = oco.get("sl_stop", sl_stop)
+                    sl_limit = oco.get("sl_limit", sl_limit)
+                    decision = "bought"
+                except Exception as e:
+                    # We bought, but failed to attach OCO
+                    decision = "bought_oco_failed"
+                    message = f"OCO failed: {e}"
+                    print("WARNING:", message)
 
-    resp = {"signal": sig, "action": "bought", "buy": buy, "oco": oco}
+                # Build order payload for DB (raw_json intentionally omitted)
+                order_payload = {
+                    "bot_id": BOT_ID,
+                    "symbol": symbol,
+                    "side": "BUY",
+                    "order_type": "MARKET",
+                    "order_id": buy.get("order", {}).get("orderId"),
+                    "status": buy.get("order", {}).get("status"),
+                    "qty": qty,
+                    "avg_price": entry,
+                    "quote_spent": float(buy.get("order", {}).get("cummulativeQuoteQty", 0.0)) if buy.get("order") else None,
+                    "tp_price": tp_price,
+                    "sl_stop": sl_stop,
+                    "sl_limit": sl_limit,
+                    "oco_schema": (oco.get("schema") if isinstance(oco, dict) else None),
+                    "executed_at": run_ts,
+                    "raw_json": None,
+                }
 
-    # log trade
+    # Build run payload for DB (raw_json not used here)
+    run_payload = {
+        "bot_id": BOT_ID,
+        "run_ts": run_ts,
+        "candle_ts": candle_ts,
+        "close_price": sig.get("close"),
+        "p_buy": sig.get("p_buy"),
+        "signal": sig.get("signal"),
+        "threshold": THRESHOLD,
+        "horizon_steps": HORIZON_STEPS,
+        "usdt_free": usdt_free,
+        "decision": decision,
+        "message": message,
+    }
+
+    # Local CSV heartbeat (optional)
     append_log([{
-        "event": "trade",
+        "event": "run",
         "ts": pd.Timestamp.utcnow().isoformat(),
-        "action": resp.get("action"),
-        "p_buy": resp.get("signal", {}).get("p_buy"),
-        "candle_ts": str(resp.get("signal", {}).get("timestamp")),
-        "buy_orderId": resp.get("buy", {}).get("order", {}).get("orderId"),
-        "buy_qty": resp.get("buy", {}).get("executed_qty"),
-        "buy_avg_price": resp.get("buy", {}).get("avg_price"),
-        "oco_schema": resp.get("oco", {}).get("schema"),
+        "candle_ts": str(sig.get("timestamp")),
+        "close": sig.get("close"),
+        "p_buy": sig.get("p_buy"),
+        "signal": sig.get("signal"),
+        "decision": decision,
+        "message": message,
     }])
 
-    # log spread heartbeat
-    append_log([{
-        "event": "spread",
-        "ts": pd.Timestamp.utcnow().isoformat(),
-        "candle_ts": str(resp.get("signal", {}).get("timestamp")),
-        "signal": resp.get("signal", {}).get("signal"),
-        "message": ("BOUGHT" if resp.get("action") == "bought" else "NO_BUY"),
-        "signal_close": resp.get("signal", {}).get("close"),
-        "fill_avg_price": resp.get("buy", {}).get("avg_price"),
-        "spread_abs": ((resp.get("buy", {}).get("avg_price") - resp.get("signal", {}).get("close"))
-                       if (resp.get("action") == "bought"
-                           and resp.get("buy", {}).get("avg_price") is not None
-                           and resp.get("signal", {}).get("close") is not None)
-                       else None),
-        "spread_pct": ((((resp.get("buy", {}).get("avg_price") / resp.get("signal", {}).get("close")) - 1) * 100)
-                       if (resp.get("action") == "bought"
-                           and resp.get("buy", {}).get("avg_price") is not None
-                           and resp.get("signal", {}).get("close") not in (None, 0))
-                       else None),
-    }])
+    # DB logging (best-effort)
+    run_id = log_run_and_order_to_api(run_payload, order_payload)
 
+    resp = {
+        "bot_id": BOT_ID,
+        "run_id": run_id,
+        "signal": sig,
+        "action": decision,
+        "message": message,
+        "order_payload": order_payload,
+    }
     return resp
 
 
 def log_open_orders(client_testnet: Client, symbol: str) -> None:
+    """
+    Prints open orders and (optionally) logs them to CSV only.
+    (Not stored in DB in the current 2-table design.)
+    """
     open_orders = safe_call(client_testnet, client_testnet.get_open_orders, symbol=symbol)
     print("Open orders:", len(open_orders))
 
@@ -492,8 +599,6 @@ def log_open_orders(client_testnet: Client, symbol: str) -> None:
 
 
 def main() -> int:
-    load_dotenv()
-
     API_KEY_TESTNET = os.getenv("BINANCE_TESTNET_API_KEY")
     API_SECRET_TESTNET = os.getenv("BINANCE_TESTNET_API_SECRET")
 
@@ -518,8 +623,7 @@ def main() -> int:
     # Load model
     model_path = MODEL_PATH
     if not os.path.isabs(model_path):
-        # resolve relative to script directory
-        model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), model_path)
+        model_path = os.path.join(SCRIPT_DIR, model_path)
 
     clf = joblib.load(model_path)
 
@@ -527,8 +631,25 @@ def main() -> int:
     try:
         resp = trade_once_if_signal(clf, client_market, client_testnet, symbol=SYMBOL)
         log_open_orders(client_testnet, symbol=SYMBOL)
+        print("DONE. action:", resp.get("action"), "run_id:", resp.get("run_id"))
         return 0
     except Exception as e:
+        # Best-effort: log an error run (without candle info)
+        run_payload = {
+            "bot_id": BOT_ID,
+            "run_ts": datetime.now(timezone.utc),
+            "candle_ts": None,
+            "close_price": None,
+            "p_buy": None,
+            "signal": None,
+            "threshold": THRESHOLD,
+            "horizon_steps": HORIZON_STEPS,
+            "usdt_free": None,
+            "decision": "error",
+            "message": str(e),
+        }
+        log_run_and_order_to_api(run_payload, order_payload=None)
+
         append_log([{
             "event": "error",
             "ts": pd.Timestamp.utcnow().isoformat(),
@@ -541,3 +662,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
