@@ -641,19 +641,20 @@ def trade_once_if_signal(
         "target_simple_return": TARGET_SIMPLE_RETURN,
     }])
 
-    run_id = log_run_and_order_to_api(run_payload, order_payload)
-
     return {
         "bot_id": BOT_ID,
-        "run_id": run_id,
+        "run_id": None,
         "signal": sig,
         "action": decision,
         "message": message,
+        "run_payload": run_payload,
         "order_payload": order_payload,
     }
 
 
 def main() -> int:
+    script_start = time.perf_counter()
+
     API_KEY_LIVE = os.getenv("BINANCE_LIVE_API_KEY")
     API_SECRET_LIVE = os.getenv("BINANCE_LIVE_API_SECRET")
 
@@ -699,9 +700,29 @@ def main() -> int:
 
     try:
         resp = trade_once_if_signal(clf, client_market, client_live, symbol=SYMBOL, interval=INTERVAL)
-        print("DONE. action:", resp.get("action"), "run_id:", resp.get("run_id"))
+
+        # Log full end-to-end script duration (includes setup + signal + order placement if any)
+        run_duration_seconds = round(time.perf_counter() - script_start, 3)
+
+        run_payload = dict(resp.get("run_payload") or {})
+        run_payload["run_duration_seconds"] = run_duration_seconds
+
+        run_id = log_run_and_order_to_api(run_payload, resp.get("order_payload"))
+        resp["run_id"] = run_id
+
+        append_log([{
+            "event": "run_duration",
+            "ts": pd.Timestamp.now("UTC").isoformat(),
+            "run_duration_seconds": run_duration_seconds,
+            "action": resp.get("action"),
+            "run_id": run_id,
+        }])
+
+        print("DONE. action:", resp.get("action"), "run_id:", resp.get("run_id"),
+              "run_duration_seconds:", run_duration_seconds)
         return 0
     except Exception as e:
+        run_duration_seconds = round(time.perf_counter() - script_start, 3)
         run_payload = {
             "bot_id": BOT_ID,
             "run_ts": datetime.now(timezone.utc),
@@ -714,6 +735,7 @@ def main() -> int:
             "usdt_free": None,
             "decision": "error",
             "message": str(e),
+            "run_duration_seconds": run_duration_seconds,
         }
         log_run_and_order_to_api(run_payload, order_payload=None)
 
@@ -723,7 +745,7 @@ def main() -> int:
             "message": str(e),
             "symbol": SYMBOL,
         }])
-        print("ERROR:", e, file=sys.stderr)
+        print("ERROR:", e, "| run_duration_seconds:", run_duration_seconds, file=sys.stderr)
         return 1
 
 
