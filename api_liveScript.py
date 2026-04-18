@@ -68,7 +68,7 @@ except Exception:
 # ==========================
 # CONFIG (edit via .env)
 # ==========================
-BOT_ID = os.getenv("BOT_ID", "btc_4h_live")
+BOT_ID = os.getenv("BOT_ID", "btc_4h_live_usdt_1304")
 
 ENABLE_API_LOGGING = os.getenv("ENABLE_API_LOGGING", "1") == "1"
 ENABLE_CSV_LOGGING = os.getenv("ENABLE_CSV_LOGGING", "1") == "1"
@@ -78,9 +78,9 @@ ENABLE_LIVE_TRADING = os.getenv("ENABLE_LIVE_TRADING", "0") == "1"
 
 LOG_PATH = os.getenv("TRADE_LOG_PATH", "trade_log_live.csv")
 
-MODEL_PATH = os.getenv("MODEL_PATH", "btc_4h_xgb_classifier5k.joblib")
+MODEL_PATH = os.getenv("MODEL_PATH", "classifier_new_1304.joblib")
 
-SYMBOL = os.getenv("SYMBOL", "BTCUSDC")
+SYMBOL = os.getenv("SYMBOL", "BTCUSDT")
 RESAMPLE_RULE = os.getenv("RESAMPLE_RULE", "4h").lower()  # logged; also maps to interval
 
 HORIZON_STEPS = int(os.getenv("HORIZON_STEPS", "6"))

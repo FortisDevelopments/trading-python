@@ -29,9 +29,8 @@ load_dotenv()
 
 API_BASE_URL = os.getenv("API_BASE_URL", "").rstrip("/")
 API_TOKEN = os.getenv("API_TOKEN", "")
-BOT_ID = os.getenv("BOT_ID", "btc_4h_LIVE")
-
-SYMBOL = os.getenv("FILLS_SYMBOL", "BTCUSDC")   # focus on BTC/USDC
+BOT_ID = os.getenv("BOT_ID", "btc_4h_live_usdt_1304")
+SYMBOL = os.getenv("FILLS_SYMBOL", os.getenv("SYMBOL", "BTCUSDT"))
 LOOKBACK_MINUTES = int(os.getenv("FILLS_LOOKBACK_MINUTES", "240"))  # fetch last N minutes
 RETRIES = int(os.getenv("API_RETRIES", "3"))
 TIMEOUT = float(os.getenv("API_TIMEOUT", "10"))

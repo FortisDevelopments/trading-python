@@ -28,7 +28,7 @@ API_BASE_URL = os.getenv("API_BASE_URL", "").rstrip("/")
 API_TOKEN = os.getenv("API_TOKEN", "")
 BOT_ID = os.getenv("BOT_ID", "btc_4h_LIVE")
 
-SYMBOL = os.getenv("EQUITY_SYMBOL", "BTCUSDC")  # keep BTCUSDC for now
+SYMBOL = os.getenv("EQUITY_SYMBOL", "BTCUSDT")  # keep BTCUSDC for now
 
 API_KEY = os.getenv("BINANCE_LIVE_API_KEY")
 API_SECRET = os.getenv("BINANCE_LIVE_API_SECRET")
@@ -95,27 +95,31 @@ def main():
 
     # BTC + USDC totals include locked (e.g., in OCO orders)
     btc_free, btc_locked, btc_total = get_totals(client, "BTC")
-    usdc_free, usdc_locked, usdc_total = get_totals(client, "USDC")
+    usdt_free, usdt_locked, usdt_total = get_totals(client, "USDT")
+
+
+
+    
 
     price = get_price(client, SYMBOL)
-    equity_usdc = usdc_total + btc_total * price
+    equity_usdt = usdt_total + btc_total * price
 
     payload = {
-        "bot_id": BOT_ID,
-        "ts": ts,
-        "symbol": SYMBOL,
+    "bot_id": BOT_ID,
+    "ts": ts,
+    "symbol": SYMBOL,
 
-        "btc_free": btc_free,
-        "btc_locked": btc_locked,
-        "btc_total": btc_total,
+    "btc_free": btc_free,
+    "btc_locked": btc_locked,
+    "btc_total": btc_total,
 
-        "usdc_free": usdc_free,
-        "usdc_locked": usdc_locked,
-        "usdc_total": usdc_total,
+    "usdt_free": usdt_free,
+    "usdt_locked": usdt_locked,
+    "usdt_total": usdt_total,
 
-        "mark_price": price,
-        "equity_usdc": equity_usdc,
-    }
+    "mark_price": price,
+    "equity_usdt": equity_usdt,
+}
 
     resp = post_equity_snapshot(payload)
     print("Equity snapshot payload:", payload)
