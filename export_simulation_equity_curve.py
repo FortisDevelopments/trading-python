@@ -12,6 +12,10 @@ Default usage:
         --data-path complete_dataN.csv \
         --output-path classification/simulation_equity_curve.csv
 
+Also exports simulation runs/orders CSVs (API-key columns aligned with live bot logging):
+    simulation_runs.csv   — one row per bar (runs.* fields)
+    simulation_orders.csv — one row per simulated BUY (orders.* fields)
+
 Notes:
 - Training labels still require future bars, so the training dataframe drops the last
   HORIZON_STEPS rows.
@@ -44,6 +48,12 @@ class BacktestConfig:
     # Data/export
     data_path: str = "/home/full-dataset-fetch/data/btcusdt_1m_master.csv"
     output_path: str = "/home/full-dataset-fetch/data/scheduled/simulation_equity_curve.csv"
+    runs_output_path: Optional[str] = None
+    orders_output_path: Optional[str] = None
+
+    # Live-parity identity (matches api_liveScript.py /api/bot/* payloads)
+    bot_id: str = "sim_btc_4h"
+    symbol: str = "BTCUSDT"
 
     # Model / label knobs
     resample_rule: str = "4h"
@@ -74,13 +84,17 @@ class BacktestConfig:
     random_state: int = 42
 
 
-def parse_optional_date(value: Optional[str]) -> Optional[str]:
+def parse_optional_path(value: Optional[str]) -> Optional[str]:
     if value is None:
         return None
     value = str(value).strip()
     if value == "" or value.lower() in {"none", "null", "na", "nan"}:
         return None
     return value
+
+
+def parse_optional_date(value: Optional[str]) -> Optional[str]:
+    return parse_optional_path(value)
 
 
 def resolve_date(value: Optional[str], fallback: pd.Timestamp) -> pd.Timestamp:
@@ -226,18 +240,31 @@ def predict_test_signals(
     return test_df
 
 
-def run_simulation(test_df: pd.DataFrame, cfg: BacktestConfig) -> tuple[pd.Series, pd.DataFrame, dict]:
+def resolve_sibling_output_path(output_path: str, sibling_name: str) -> Path:
+    base = Path(output_path)
+    return base.with_name(sibling_name)
+
+
+def run_simulation(
+    test_df: pd.DataFrame,
+    cfg: BacktestConfig,
+) -> tuple[pd.Series, pd.DataFrame, pd.DataFrame, pd.DataFrame, dict]:
     # Standard - Same Equity Curve (2025-06-25): execution model differs from live OCO —
     # entries/exits use bar Close; live uses market fill + intrabar TP/SL (see features.py).
     prices = test_df["Close"].sort_index()
     pred_buy = test_df["signal"].reindex(prices.index).astype(int)
+    p_buy_series = test_df["p_buy"].reindex(prices.index)
 
     equity_cash = float(cfg.initial_equity)
     open_positions: list[dict] = []
     equity_curve: list[float] = []
     equity_index: list[pd.Timestamp] = []
     trades: list[dict] = []
+    runs: list[dict] = []
+    orders: list[dict] = []
     total_commission = 0.0
+    next_run_id = 1
+    next_order_id = 1
 
     for dt, price in prices.items():
         price = float(price)
@@ -283,10 +310,25 @@ def run_simulation(test_df: pd.DataFrame, cfg: BacktestConfig) -> tuple[pd.Serie
 
         open_positions = still_open
 
-        # 2) Open new position if signal is active and constraints allow it.
-        if pred_buy.loc[dt] == 1 and len(open_positions) < cfg.max_open_trades and equity_cash > 0:
+        # 2) Decide and optionally open a new position (mirrors live run + order logging).
+        signal = int(pred_buy.loc[dt])
+        p_buy = float(p_buy_series.loc[dt])
+        order_row: dict | None = None
+        run_id = next_run_id
+        next_run_id += 1
+        usdt_free = equity_cash
+
+        if signal != 1:
+            decision = "none"
+        elif len(open_positions) >= cfg.max_open_trades:
+            decision = "skipped_max_open_trades"
+        elif equity_cash <= 0:
+            decision = "skipped_no_balance"
+        else:
             trade_equity = equity_cash * cfg.pct_account_per_trade
-            if trade_equity > 0:
+            if trade_equity <= 0:
+                decision = "skipped_no_balance"
+            else:
                 buy_commission = trade_equity * cfg.commission_pct
                 net_buy_value = trade_equity - buy_commission
                 size = net_buy_value / price
@@ -304,6 +346,40 @@ def run_simulation(test_df: pd.DataFrame, cfg: BacktestConfig) -> tuple[pd.Serie
 
                 equity_cash -= trade_equity
                 total_commission += buy_commission
+                decision = "bought"
+
+                order_row = {
+                    "id": next_order_id,
+                    "run_id": run_id,
+                    "bot_id": cfg.bot_id,
+                    "symbol": cfg.symbol,
+                    "side": "BUY",
+                    "order_type": "MARKET",
+                    "status": "FILLED",
+                    "qty": size,
+                    "avg_price": price,
+                    "quote_spent": trade_equity,
+                    "executed_at": dt,
+                }
+                next_order_id += 1
+
+        runs.append(
+            {
+                "id": run_id,
+                "bot_id": cfg.bot_id,
+                "run_ts": dt,
+                "candle_ts": dt,
+                "close_price": price,
+                "p_buy": p_buy,
+                "signal": signal,
+                "threshold": cfg.threshold,
+                "horizon_steps": cfg.horizon_steps,
+                "decision": decision,
+                "usdt_free": usdt_free,
+            }
+        )
+        if order_row is not None:
+            orders.append(order_row)
 
         # 3) Mark-to-market portfolio value at this timestamp.
         open_value = sum(pos["size"] * price for pos in open_positions)
@@ -349,6 +425,14 @@ def run_simulation(test_df: pd.DataFrame, cfg: BacktestConfig) -> tuple[pd.Serie
     if not trades_df.empty:
         trades_df = trades_df.sort_values("entry_time").reset_index(drop=True)
 
+    runs_df = pd.DataFrame(runs)
+    if not runs_df.empty:
+        runs_df = runs_df.sort_values("run_ts").reset_index(drop=True)
+
+    orders_df = pd.DataFrame(orders)
+    if not orders_df.empty:
+        orders_df = orders_df.sort_values("executed_at").reset_index(drop=True)
+
     final_equity = float(equity_series.iloc[-1])
     total_return_pct = (final_equity / cfg.initial_equity - 1.0) * 100.0
 
@@ -376,7 +460,36 @@ def run_simulation(test_df: pd.DataFrame, cfg: BacktestConfig) -> tuple[pd.Serie
         "end_date": str(end_date),
     }
 
-    return equity_series, trades_df, summary
+    return equity_series, trades_df, runs_df, orders_df, summary
+
+
+RUNS_EXPORT_COLS = [
+    "id",
+    "bot_id",
+    "run_ts",
+    "candle_ts",
+    "close_price",
+    "p_buy",
+    "signal",
+    "threshold",
+    "horizon_steps",
+    "decision",
+    "usdt_free",
+]
+
+ORDERS_EXPORT_COLS = [
+    "id",
+    "run_id",
+    "bot_id",
+    "symbol",
+    "side",
+    "order_type",
+    "status",
+    "qty",
+    "avg_price",
+    "quote_spent",
+    "executed_at",
+]
 
 
 def export_equity_curve(equity_series: pd.Series, output_path: str) -> Path:
@@ -388,11 +501,41 @@ def export_equity_curve(equity_series: pd.Series, output_path: str) -> Path:
     return path
 
 
+def export_simulation_runs(runs_df: pd.DataFrame, output_path: str) -> Path:
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if runs_df.empty:
+        export_df = pd.DataFrame(columns=RUNS_EXPORT_COLS)
+    else:
+        export_df = runs_df.reindex(columns=RUNS_EXPORT_COLS)
+
+    export_df.to_csv(path, index=False)
+    return path
+
+
+def export_simulation_orders(orders_df: pd.DataFrame, output_path: str) -> Path:
+    path = Path(output_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if orders_df.empty:
+        export_df = pd.DataFrame(columns=ORDERS_EXPORT_COLS)
+    else:
+        export_df = orders_df.reindex(columns=ORDERS_EXPORT_COLS)
+
+    export_df.to_csv(path, index=False)
+    return path
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Import data, simulate strategy, and export only the equity curve CSV.")
 
     parser.add_argument("--data-path", default=BacktestConfig.data_path)
     parser.add_argument("--output-path", default=BacktestConfig.output_path)
+    parser.add_argument("--runs-output-path", default=BacktestConfig.runs_output_path)
+    parser.add_argument("--orders-output-path", default=BacktestConfig.orders_output_path)
+    parser.add_argument("--bot-id", default=BacktestConfig.bot_id)
+    parser.add_argument("--symbol", default=BacktestConfig.symbol)
 
     parser.add_argument("--resample-rule", default=BacktestConfig.resample_rule)
     parser.add_argument("--horizon-steps", type=int, default=BacktestConfig.horizon_steps)
@@ -418,6 +561,10 @@ def config_from_args(args: argparse.Namespace) -> BacktestConfig:
     return BacktestConfig(
         data_path=args.data_path,
         output_path=args.output_path,
+        runs_output_path=parse_optional_path(args.runs_output_path),
+        orders_output_path=parse_optional_path(args.orders_output_path),
+        bot_id=args.bot_id,
+        symbol=args.symbol,
         resample_rule=args.resample_rule,
         horizon_steps=args.horizon_steps,
         target_simple_return=args.target_simple_return,
@@ -459,8 +606,17 @@ def main() -> int:
 
     clf = train_classifier(df_labeled, cfg)
     test_df = predict_test_signals(clf, df_features, cfg)
-    equity_series, trades_df, summary = run_simulation(test_df, cfg)
+    equity_series, _trades_df, runs_df, orders_df, summary = run_simulation(test_df, cfg)
     output_path = export_equity_curve(equity_series, cfg.output_path)
+
+    runs_output_path = cfg.runs_output_path or str(
+        resolve_sibling_output_path(cfg.output_path, "simulation_runs.csv")
+    )
+    orders_output_path = cfg.orders_output_path or str(
+        resolve_sibling_output_path(cfg.output_path, "simulation_orders.csv")
+    )
+    runs_path = export_simulation_runs(runs_df, runs_output_path)
+    orders_path = export_simulation_orders(orders_df, orders_output_path)
 
     print("=== RESULTS ===")
     print(f"Initial equity:       {summary['initial_equity']:,.2f}")
@@ -472,6 +628,8 @@ def main() -> int:
     print(f"Total commission:     {summary['total_commission']:,.2f}")
     print()
     print(f"Equity curve exported to: {output_path.resolve()}")
+    print(f"Runs exported to:         {runs_path.resolve()} ({len(runs_df):,} rows)")
+    print(f"Orders exported to:       {orders_path.resolve()} ({len(orders_df):,} rows)")
     print(f"Export range: {equity_series.index.min()} -> {equity_series.index.max()}")
 
     return 0
