@@ -18,6 +18,8 @@ One cycle:
 Notes:
 - Candles are fetched from mainnet (public) for sufficient history, while orders are placed on testnet.
 - OCO may be unsupported/limited on some testnet environments. If OCO fails, the script will continue.
+- Feature engineering (2025-06-25): shared via features.py.
+  Tag: Standard - Same Equity Curve — see features.py for parity checklist.
 """
 
 from __future__ import annotations
@@ -29,12 +31,15 @@ from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
 from typing import Dict, Any, List, Optional
 
-import numpy as np
 import pandas as pd
 import joblib
 from dotenv import load_dotenv
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
+
+from features import FEATURE_COLS, build_features
+
+# Standard - Same Equity Curve (2025-06-25): same FEATURE_COLS as live + export + notebook.
 
 
 # Ensure imports from the same folder work under cron (logger_api.py)
@@ -78,16 +83,7 @@ STOP_LOSS = float(os.getenv("STOP_LOSS", "0.007443"))
 MAX_OPEN_TRADES = int(os.getenv("MAX_OPEN_TRADES", "4"))
 PCT_ACCOUNT_PER_TRADE = float(os.getenv("PCT_ACCOUNT_PER_TRADE", "0.05"))
 
-# Feature columns expected by the model
-FEATURE_COLS = [
-    "Volume",
-    "returns", "log_returns",
-    "RSI_14",
-    "MACD", "MACD_signal",
-    "PROC_HORIZON",
-    "hour",
-    "ADX_14",
-]
+# Standard - Same Equity Curve (2025-06-25): testnet trading params are separate from live/sim defaults.
 
 
 # ==========================
@@ -213,67 +209,6 @@ def fetch_4h_klines_mainnet(client_market: Client, symbol: str, limit: int = 150
     # keep only closed candles
     now_utc = datetime.now(timezone.utc)
     df = df[df["close_time"] <= now_utc]
-    return df
-
-
-# ==========================
-# Feature engineering
-# ==========================
-def build_features(df_ohlcv: pd.DataFrame, horizon_steps: int) -> pd.DataFrame:
-    df = df_ohlcv.copy()
-    close = df["Close"]
-    high = df["High"]
-    low = df["Low"]
-
-    df["hour"] = df.index.hour  # UTC hour
-
-    df["returns"] = close.pct_change()
-    df["log_returns"] = np.log(close / close.shift(1))
-
-    # RSI_14
-    window_rsi = 14
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window_rsi).mean()
-    avg_loss = loss.rolling(window_rsi).mean()
-    rs = avg_gain / avg_loss
-    df["RSI_14"] = 100 - (100 / (1 + rs))
-
-    # MACD (12,26,9)
-    ema_12 = close.ewm(span=12, adjust=False).mean()
-    ema_26 = close.ewm(span=26, adjust=False).mean()
-    df["MACD"] = ema_12 - ema_26
-    df["MACD_signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
-
-    # PROC_HORIZON = % change over horizon_steps bars (your definition)
-    df["PROC_HORIZON"] = close.pct_change(periods=horizon_steps)
-
-    # ADX_14 (rolling approximation)
-    tr1 = high - low
-    tr2 = (high - close.shift(1)).abs()
-    tr3 = (low - close.shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
-    up_move = high.diff()
-    down_move = -low.diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = pd.Series(plus_dm, index=df.index)
-    minus_dm = pd.Series(minus_dm, index=df.index)
-
-    atr = tr.rolling(14).mean()
-    plus_di = 100 * (plus_dm.rolling(14).sum() / atr)
-    minus_di = 100 * (minus_dm.rolling(14).sum() / atr)
-    dx = ((plus_di - minus_di).abs() / (plus_di + minus_di)) * 100
-    df["ADX_14"] = dx.rolling(14).mean()
-
-    df = df.dropna()
-
-    missing = [c for c in FEATURE_COLS if c not in df.columns]
-    if missing:
-        raise RuntimeError(f"Missing feature columns after build: {missing}")
-
     return df
 
 

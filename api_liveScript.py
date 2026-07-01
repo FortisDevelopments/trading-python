@@ -19,19 +19,23 @@ Safety:
 - By default, ENABLE_LIVE_TRADING=0, so no real orders are placed.
   Set ENABLE_LIVE_TRADING=1 in .env once you are ready.
 
-Config (from .env, with defaults matching your requested live settings):
-- MODEL_PATH=btxxx.joblib (default: btc_4h_xgb_classifier5k.joblib)
-- RESAMPLE_RULE=4h  (maps to Binance interval; default 4h)
+Config (from .env, with defaults matching Standard - Same Equity Curve):
+- MODEL_PATH=ModelId740_4784.92%_4h_6_Time_2026-06-25_18-45-56.joblib
+- RESAMPLE_RULE=4h  (maps to Binance interval)
 - HORIZON_STEPS=6
-- TARGET_SIMPLE_RETURN=0.0035  (logged only)
-- THRESHOLD=0.42
-- TAKE_PROFIT=0.045
-- STOP_LOSS=0.005
+- TARGET_SIMPLE_RETURN=0.003472  (logged only)
+- THRESHOLD=0.4214
+- TAKE_PROFIT=0.0455
+- STOP_LOSS=0.0051
 - MAX_OPEN_TRADES=3
-- PCT_ACCOUNT_PER_TRADE=0.79
+- PCT_ACCOUNT_PER_TRADE=0.7888
 
 Requires:
 - python-binance, python-dotenv, requests, joblib, pandas, numpy
+
+Feature engineering (2025-06-25): shared via features.py.
+Tag: Standard - Same Equity Curve — search repo for that string.
+See features.py for the simulation-vs-live parity checklist (model path, .env defaults, TP/SL model, etc.).
 """
 
 from __future__ import annotations
@@ -43,12 +47,15 @@ from datetime import datetime, timezone
 from decimal import Decimal, ROUND_DOWN
 from typing import Dict, Any, List, Optional, Tuple
 
-import numpy as np
 import pandas as pd
 import joblib
 from dotenv import load_dotenv
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
+
+from features import FEATURE_COLS, build_features
+
+# Standard - Same Equity Curve (2025-06-25): inference features must match notebook + export script.
 
 # Ensure imports from the same folder work under cron (logger_api.py)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -78,32 +85,26 @@ ENABLE_LIVE_TRADING = os.getenv("ENABLE_LIVE_TRADING", "0") == "1"
 
 LOG_PATH = os.getenv("TRADE_LOG_PATH", "trade_log_live.csv")
 
-MODEL_PATH = os.getenv("MODEL_PATH", "classifier_new_1304.joblib")
+# Standard - Same Equity Curve (2026-06-25): notebook search winner, 4h horizon 6
+DEFAULT_MODEL_PATH = "ModelId740_4784.92%_4h_6_Time_2026-06-25_18-45-56.joblib"
+MODEL_PATH = os.getenv("MODEL_PATH", DEFAULT_MODEL_PATH)
 
 SYMBOL = os.getenv("SYMBOL", "BTCUSDT")
 RESAMPLE_RULE = os.getenv("RESAMPLE_RULE", "4h").lower()  # logged; also maps to interval
 
 HORIZON_STEPS = int(os.getenv("HORIZON_STEPS", "6"))
-TARGET_SIMPLE_RETURN = float(os.getenv("TARGET_SIMPLE_RETURN", "0.0035"))  # logged only
+TARGET_SIMPLE_RETURN = float(os.getenv("TARGET_SIMPLE_RETURN", "0.003472"))  # logged only
 
-THRESHOLD = float(os.getenv("THRESHOLD", "0.42"))
+THRESHOLD = float(os.getenv("THRESHOLD", "0.4214"))
 
-TAKE_PROFIT = float(os.getenv("TAKE_PROFIT", "0.045"))
-STOP_LOSS = float(os.getenv("STOP_LOSS", "0.005"))
+TAKE_PROFIT = float(os.getenv("TAKE_PROFIT", "0.0455"))
+STOP_LOSS = float(os.getenv("STOP_LOSS", "0.0051"))
 
 MAX_OPEN_TRADES = int(os.getenv("MAX_OPEN_TRADES", "3"))
-PCT_ACCOUNT_PER_TRADE = float(os.getenv("PCT_ACCOUNT_PER_TRADE", "0.79"))
+PCT_ACCOUNT_PER_TRADE = float(os.getenv("PCT_ACCOUNT_PER_TRADE", "0.7888"))
 
-# Feature columns expected by the model
-FEATURE_COLS = [
-    "Volume",
-    "returns", "log_returns",
-    "RSI_14",
-    "MACD", "MACD_signal",
-    "PROC_HORIZON",
-    "hour",
-    "ADX_14",
-]
+# Standard - Same Equity Curve: defaults above match export_simulation_equity_curve.py.
+# Override via .env; grep "Standard - Same Equity Curve" in features.py for full checklist.
 
 
 # ==========================
@@ -256,67 +257,6 @@ def fetch_klines_mainnet(client_market: Client, symbol: str, interval: str, limi
     # keep only closed candles
     now_utc = datetime.now(timezone.utc)
     df = df[df["close_time"] <= now_utc]
-    return df
-
-
-# ==========================
-# Feature engineering
-# ==========================
-def build_features(df_ohlcv: pd.DataFrame, horizon_steps: int) -> pd.DataFrame:
-    df = df_ohlcv.copy()
-    close = df["Close"]
-    high = df["High"]
-    low = df["Low"]
-
-    df["hour"] = df.index.hour  # UTC hour
-
-    df["returns"] = close.pct_change()
-    df["log_returns"] = np.log(close / close.shift(1))
-
-    # RSI_14
-    window_rsi = 14
-    delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(window_rsi).mean()
-    avg_loss = loss.rolling(window_rsi).mean()
-    rs = avg_gain / avg_loss
-    df["RSI_14"] = 100 - (100 / (1 + rs))
-
-    # MACD (12,26,9)
-    ema_12 = close.ewm(span=12, adjust=False).mean()
-    ema_26 = close.ewm(span=26, adjust=False).mean()
-    df["MACD"] = ema_12 - ema_26
-    df["MACD_signal"] = df["MACD"].ewm(span=9, adjust=False).mean()
-
-    # PROC_HORIZON = % change over horizon_steps bars (your definition)
-    df["PROC_HORIZON"] = close.pct_change(periods=horizon_steps)
-
-    # ADX_14 (rolling approximation)
-    tr1 = high - low
-    tr2 = (high - close.shift(1)).abs()
-    tr3 = (low - close.shift(1)).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
-    up_move = high.diff()
-    down_move = -low.diff()
-    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
-    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
-    plus_dm = pd.Series(plus_dm, index=df.index)
-    minus_dm = pd.Series(minus_dm, index=df.index)
-
-    atr = tr.rolling(14).mean()
-    plus_di = 100 * (plus_dm.rolling(14).sum() / atr)
-    minus_di = 100 * (minus_dm.rolling(14).sum() / atr)
-    dx = ((plus_di - minus_di).abs() / (plus_di + minus_di)) * 100
-    df["ADX_14"] = dx.rolling(14).mean()
-
-    df = df.dropna()
-
-    missing = [c for c in FEATURE_COLS if c not in df.columns]
-    if missing:
-        raise RuntimeError(f"Missing feature columns after build: {missing}")
-
     return df
 
 
