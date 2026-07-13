@@ -69,7 +69,7 @@ ENABLE_API_LOGGING = os.getenv("ENABLE_API_LOGGING", "1") == "1"
 ENABLE_CSV_LOGGING = os.getenv("ENABLE_CSV_LOGGING", "1") == "1"
 LOG_PATH = os.getenv("TRADE_LOG_PATH", "trade_log.csv")
 
-MODEL_PATH = os.getenv("MODEL_PATH", "btc_4h_xgb_classifier.joblib")
+MODEL_PATH = os.getenv("MODEL_PATH", "Models/BTCUSDT4h1307.joblib")
 
 SYMBOL = os.getenv("SYMBOL", "BTCUSDT")
 INTERVAL = Client.KLINE_INTERVAL_4HOUR

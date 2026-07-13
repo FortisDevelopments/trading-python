@@ -224,6 +224,8 @@ class PreflightChecker:
             must_not_contain=[
                 ('SYMBOL = os.getenv("SYMBOL", "BTCUSDC")', 'old_default_symbol'),
                 ('MODEL_PATH = os.getenv("MODEL_PATH", "btc_4h_xgb_classifier5k.joblib")', 'old_default_model'),
+                ('ModelId740_4784.92%_4h_6_Time_2026-06-25_18-45-56.joblib', 'old_modelid740_path'),
+                ('classifier_new_1304.joblib', 'old_classifier_1304'),
             ],
         )
 
@@ -306,7 +308,7 @@ class PreflightChecker:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Check whether the project is ready for the BTCUSDT reset/relaunch.")
     parser.add_argument("--root", default=os.getcwd(), help="Project root directory (default: current working directory)")
-    parser.add_argument("--model", default="classifier_new_1304.joblib", help="Expected model filename")
+    parser.add_argument("--model", default="Models/BTCUSDT4h1307.joblib", help="Expected model path")
     parser.add_argument("--symbol", default="BTCUSDT", help="Expected trading symbol")
     parser.add_argument("--quote", default="USDT", help="Expected quote asset")
     args = parser.parse_args()

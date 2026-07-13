@@ -51,11 +51,9 @@ deploying this module, still reconcile the following:
    - Simulation sizes from equity_cash; live sizes from quote_free balance.
 
 7. RETRAIN AFTER ADX FIX (2025-06-25)
-   - If classifier_new_1304.joblib was trained with the old rolling ADX from
-     api_liveScript.py, retrain and redeploy the model using this module so
-     training and inference both use Wilder-smoothed ADX_14.
-   - V2_Bot_BTC.ipynb now imports add_features / FEATURE_COLS from here and
-     writes classifier_v2_20250625.joblib for the live bot (set MODEL_PATH).
+   - Retrain and redeploy using this module so training and inference both use
+     Wilder-smoothed ADX_14. Production live model: Models/BTCUSDT4h1307.joblib
+     (set MODEL_PATH in .env).
 ---------------------------------------------------------------------------
 """
 

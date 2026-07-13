@@ -20,7 +20,7 @@ Safety:
   Set ENABLE_LIVE_TRADING=1 in .env once you are ready.
 
 Config (from .env, with defaults matching Standard - Same Equity Curve):
-- MODEL_PATH=ModelId740_4784.92%_4h_6_Time_2026-06-25_18-45-56.joblib
+- MODEL_PATH=Models/BTCUSDT4h1307.joblib
 - RESAMPLE_RULE=4h  (maps to Binance interval)
 - HORIZON_STEPS=6
 - TARGET_SIMPLE_RETURN=0.003472  (logged only)
@@ -85,8 +85,8 @@ ENABLE_LIVE_TRADING = os.getenv("ENABLE_LIVE_TRADING", "0") == "1"
 
 LOG_PATH = os.getenv("TRADE_LOG_PATH", "trade_log_live.csv")
 
-# Standard - Same Equity Curve (2026-06-25): notebook search winner, 4h horizon 6
-DEFAULT_MODEL_PATH = "ModelId740_4784.92%_4h_6_Time_2026-06-25_18-45-56.joblib"
+# Production classifier under Models/
+DEFAULT_MODEL_PATH = "Models/BTCUSDT4h1307.joblib"
 MODEL_PATH = os.getenv("MODEL_PATH", DEFAULT_MODEL_PATH)
 
 SYMBOL = os.getenv("SYMBOL", "BTCUSDT")
